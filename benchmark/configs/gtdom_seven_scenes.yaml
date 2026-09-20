@@ -1,0 +1,16 @@
+# Is gtsup's degradation domain-distance dependent, or uniform?  Trained on MCD
+# only.  Uniform movement across datasets implicates the objective's descent
+# direction; movement that tracks distance from MCD implicates transfer.
+# base_auto is listed so this run re-uses the SAME baseline the v6f/v7f step
+# curves already sit on -- the comparison is against that history, not a fresh pair.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/seven_scenes
+datasets:
+  - seven_scenes
+methods:
+  - base_auto
+  - sd_gtsups275_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

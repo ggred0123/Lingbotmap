@@ -1,5 +1,5 @@
 dataset: seven_scenes
-raw_data_root: /path/to/7-scenes
+raw_data_root: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/seonghyun/R3R/data/7scenes
 _split: test
 sampling:
   strategy: sequence

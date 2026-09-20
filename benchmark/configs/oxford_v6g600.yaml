@@ -1,0 +1,16 @@
+# One checkpoint, one question: does v6g at step 600 avoid the collapse v6f had
+# there (+32.1% ATE)?  v6g differs from v6f only in the horizon policy --
+# 320-3840 redrawn (82% of steps at h>=960) vs 96-3840 fixed (30%) -- so this
+# single number decides whether the shallow-horizon change caused the regression.
+# base_k1 is already complete and is carried only so evaluate scores both.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_k1
+  - sd_v6gs600_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

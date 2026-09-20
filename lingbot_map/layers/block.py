@@ -414,7 +414,7 @@ class CameraBlock(nn.Module):
 
         return block_mask
 
-    def forward(self, x: Tensor, pos=None, video_mask=None, num_frames=0, frame_seqlen=0, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=8, num_frame_for_scale=-1, sliding_window_size=None, full_attention=False, enable_3d_rope=False, is_scale_frames=False) -> Tensor:
+    def forward(self, x: Tensor, pos=None, video_mask=None, num_frames=0, frame_seqlen=0, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=8, num_frame_for_scale=-1, sliding_window_size=None, full_attention=False, enable_3d_rope=False, is_scale_frames=False, attn_mask=None) -> Tensor:
         # Use passed sliding_window_size if provided, otherwise use self.sliding_window_size
         effective_sliding_window_size = sliding_window_size if sliding_window_size is not None else self.sliding_window_size
 
@@ -436,15 +436,18 @@ class CameraBlock(nn.Module):
 
         # Skip mask creation when using KV cache (streaming mode) — the streaming
         # attention path in CausalAttention ignores block_mask entirely.
+        # ``attn_mask`` (masked parallel training path) supersedes both: it already
+        # encodes the GCA rules, so building the blockwise-causal mask here would
+        # be dead work — and it is the per-block rebuild §2.3 warns about.
         mask_block = None
-        if kv_cache is None:
+        if kv_cache is None and attn_mask is None:
             mask_block = self._prepare_blockwise_causal_attn_mask(
                 device=x.device, num_frames=num_frames, frame_seqlen=frame_seqlen, num_frame_per_block=num_frame_per_block)
 
 
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
             return self.ls1(self.attn(self.norm1(x), pos=pos, block_mask=mask_block, frame_seqlen=frame_seqlen, video_mask=video_mask, current_start=current_start, current_end=current_end, kv_cache=kv_cache, global_idx=global_idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=effective_sliding_window_size, attend_to_scale_frames=self.attend_to_scale_frames, num_random_frames=self.num_random_frames,
-                                      enable_3d_rope=enable_3d_rope, is_scale_frames=is_scale_frames))
+                                      enable_3d_rope=enable_3d_rope, is_scale_frames=is_scale_frames, attn_mask=attn_mask))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
@@ -510,14 +513,24 @@ class SDPABlock(nn.Module):
     def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
                 kv_cache=None, global_idx=0, num_frame_per_block=1,
-                num_frame_for_scale=-1, num_register_tokens=4) -> Tensor:
+                num_frame_for_scale=-1, num_register_tokens=4,
+                attn_mask=None) -> Tensor:
+        """Streaming (kv_cache) or masked-parallel (attn_mask) global attention.
+
+        Passing ``attn_mask`` selects the parallel training path in
+        ``SDPAAttention``: same weights, same module names, no cache mutation.
+        The masked path deliberately reuses this module rather than introducing a
+        parallel ``MaskedGlobalBlock`` (docs/phase1-plan.md §3-T1.1) -- sharing
+        the instance is a stronger guarantee of checkpoint compatibility than
+        mirroring the parameter names, and it avoids duplicating 302M params.
+        """
         def attn_residual_func(x, pos=None):
             return self.ls1(self.attn(
                 self.norm1(x), pos=pos,
                 num_patches=num_patches, num_special=num_special, num_frames=num_frames,
                 enable_3d_rope=enable_3d_rope, kv_cache=kv_cache, global_idx=global_idx,
                 num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale,
-                num_register_tokens=num_register_tokens,
+                num_register_tokens=num_register_tokens, attn_mask=attn_mask,
             ))
 
         def ffn_residual_func(x):

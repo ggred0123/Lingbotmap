@@ -1,0 +1,14 @@
+# Oxford K=1 -- the deployment condition the whole L / supervision-placement
+# round was aimed at.  base has won here for every cell so far.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - sd_v6cs300_k1
+  - sd_v6ds300_k1
+  - sd_v6bs300_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

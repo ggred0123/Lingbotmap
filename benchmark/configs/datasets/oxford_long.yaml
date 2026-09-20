@@ -1,5 +1,5 @@
 dataset: oxford_spires
-raw_data_root: /path/to/oxford_spires
+raw_data_root: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/seonghyun/R3R/data/oxford_spires
 sampling:
   strategy: sequence
   stride: 1

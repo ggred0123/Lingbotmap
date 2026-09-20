@@ -1,0 +1,22 @@
+# The released lingbot_map config verbatim (keyframe_interval: auto), to check
+# whether base_k1 reproduces it and how both sit against the upstream README row
+# (Oxford Spires, 10 scenes: ATE 5.374 / RPE-t 0.930 / RPE-r 3.694).
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - lingbot_map
+evaluation:
+  traj:
+    enable: true
+    vis: false
+  auc:
+    enable: true
+    vis: false
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

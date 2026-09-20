@@ -17,3 +17,19 @@ weights/
 **/.DS_Store
 docs/
 
+wandb/
+pylibs/
+ckpt_train/
+bench_ckpt/
+data/
+labels/
+experiments/logs/
+experiments/results/
+*.bak
+*.bak.*
+*.bak2
+*.nosave
+docs2/
+communication/
+.wandb_key
+*.log

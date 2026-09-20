@@ -1,0 +1,14 @@
+# oxford_long K=1, half A -- base_k1 only, so it can occupy one GPU while half B
+# runs the distilled pair on the other.  Same workspace as v6bench_oxford_long.yaml;
+# completion is tracked per (scene, method) by .complete.json, so the two halves
+# write disjoint directories and neither re-runs what the other finished.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+datasets:
+  - oxford_long
+methods:
+  - base_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

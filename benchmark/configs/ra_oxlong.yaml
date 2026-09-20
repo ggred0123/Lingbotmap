@@ -1,0 +1,18 @@
+# Does re-anchoring RESCUE a trained checkpoint?  eval-metric-audit.html section
+# 04 says what collapses is the depth/pose scale, and section 10 candidate 4 says
+# periodic re-anchoring bounds that drift.  If the v6i-vs-base gap on the long
+# cell closes when both are re-anchored, the damage is gauge drift; if it does
+# not, the damage is something re-anchoring cannot reach.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+datasets:
+  - oxford_long
+methods:
+  - base_ra64_auto
+  - sd_v6is1200_ra64_auto
+  - base_ra32_auto
+  - sd_v6is1200_ra32_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

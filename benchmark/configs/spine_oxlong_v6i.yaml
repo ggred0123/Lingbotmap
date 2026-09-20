@@ -1,0 +1,14 @@
+# v6i (p_identity=0.35 mixture) on oxford_long -- the third point of the spine
+# experiment, and the control docs/eval-metric-audit.html 2b says is missing.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+datasets:
+  - oxford_long
+methods:
+  - base_auto
+  - sd_v6is300_auto
+  - sd_v6is1200_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

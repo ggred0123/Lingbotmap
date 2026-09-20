@@ -1,0 +1,32 @@
+# Oxford Spires - EARLY checkpoints (s50/s100/s150) of a3 (walk) and a2pc (window).
+# Locates the K=1 optimum, which s200/s250/s300 showed is before step 300.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_a3s50_h64
+  - sd_a3s50_k28
+  - sd_a3s100_h64
+  - sd_a3s100_k28
+  - sd_a3s150_h64
+  - sd_a3s150_k28
+  - sd_a2pcs50_h64
+  - sd_a2pcs50_k28
+  - sd_a2pcs100_h64
+  - sd_a2pcs100_k28
+  - sd_a2pcs150_h64
+  - sd_a2pcs150_k28
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

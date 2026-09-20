@@ -1,5 +1,5 @@
 dataset: tum
-raw_data_root: /path/to/TUM-RGBD
+raw_data_root: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/seonghyun/R3R/data/tum
 _load_img_size: 518
 evaluation:
   depth:

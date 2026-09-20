@@ -1,0 +1,23 @@
+# Oxford Spires K=1 -- v5 cells vs base / a3 / a4, all 10 scenes.
+# Keyframe baseline at this K (experiments/kf_baseline.py, loader stride 12): 1.71 m / 5.9 deg
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_v5as300_k1
+  - sd_v5cs300_k1
+  - sd_a3s300_k1
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

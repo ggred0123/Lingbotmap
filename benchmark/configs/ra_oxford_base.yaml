@@ -1,0 +1,17 @@
+# eval-metric-audit.html section 10 candidate 4, order 1: how deep does the model
+# hold its gauge?  Re-anchor every M keyframes, stitch with Sim(3), and read off
+# the M at which the trajectory comes back.  Inference only -- no retraining.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_k1
+  - base_ra16_k1
+  - base_ra32_k1
+  - base_ra64_k1
+  - base_ra128_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

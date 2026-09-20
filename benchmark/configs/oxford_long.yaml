@@ -1,12 +1,13 @@
 # Oxford Spires long sequences (stride 1) — lingbot_map ATE-only evaluation.
 # For the short-sequence pose + AUC benchmark, use configs/oxford.yaml.
-workspace: /path/to/workspace/oxford_long
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
 
 datasets:
   - oxford_long
 
 methods:
-  - lingbot_map
+  - base_h64
+  - sd_a1_h64
 
 evaluation:
   traj:

@@ -1,0 +1,27 @@
+# Oxford stride-12 at K=1 for the whole v6g checkpoint sweep.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_k1
+  - sd_v6gs50_k1
+  - sd_v6gs100_k1
+  - sd_v6gs150_k1
+  - sd_v6gs200_k1
+  - sd_v6gs250_k1
+  - sd_v6gs300_k1
+  - sd_v6gs350_k1
+  - sd_v6gs400_k1
+  - sd_v6gs450_k1
+  - sd_v6gs500_k1
+  - sd_v6gs550_k1
+  - sd_v6gs600_k1
+  - sd_v6gs650_k1
+  - sd_v6gs700_k1
+  - sd_v6gs750_k1
+  - sd_v6gs800_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

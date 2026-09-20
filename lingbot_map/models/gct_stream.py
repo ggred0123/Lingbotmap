@@ -8,6 +8,7 @@ Provides streaming inference functionality:
 - 3D RoPE support for temporal consistency
 """
 
+import contextlib
 import logging
 import os
 import torch
@@ -318,6 +319,46 @@ class GCTStream(GCTBase):
             self.camera_head.clean_kv_cache()
         else:
             logger.warning("Camera head does not support KV cache cleaning")
+
+    @contextlib.contextmanager
+    def masked_window(self, window_start: int = 0, keyframe_interval: int = 1,
+                      mask_dtype: str = "bool", check_prefix=True,
+                      camera_head: bool = True):
+        """Context manager: run the parallel masked training path.
+
+        Inside it, ``forward(images[:, t0:t0+S], num_frame_per_block=S,
+        causal_inference=False)`` pushes the whole supervised window through the
+        aggregator's 24 global blocks AND the camera head's 4x4 trunk in one
+        shot, reproducing each stack's streaming read set with a GCA mask rather
+        than a mutating KV cache.  See docs/phase1-plan.md §3-T1 and §3-T2.
+
+        Neither cache is written and neither frame counter advances, so the
+        stream state comes out exactly as it went in and a trainer can take many
+        steps from one restored snapshot.
+
+        What the caller owns: the prefix caches must already hold the deployed
+        rollout up to ``window_start``, and must be detached -- this path does
+        not cut the graph for you, that is the Level-0 boundary
+        (``grad_probe.detach_caches``).  Pass ``window_start=0`` with a cleaned
+        cache for a standalone clip that begins at its own anchor.
+
+        ``check_prefix`` guards the one silent failure mode left: a
+        ``window_start`` that does not match the rollout the cache came from
+        produces a wrong read set with correct shapes.  It raises by default;
+        pass ``"warn"`` only if you have verified the cache layout another way.
+
+        ``camera_head=False`` leaves the head on its old batch-mask path; use it
+        only to isolate the aggregator when debugging.
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self.aggregator.masked_window(
+                window_start=window_start, keyframe_interval=keyframe_interval,
+                mask_dtype=mask_dtype, check_prefix=check_prefix))
+            if camera_head and self.camera_head is not None:
+                stack.enter_context(self.camera_head.masked_window(
+                    window_start=window_start, keyframe_interval=keyframe_interval,
+                    mask_dtype=mask_dtype))
+            yield self
 
     def _set_skip_append(self, skip: bool):
         """Set _skip_append flag on all KV caches (aggregator + camera head).

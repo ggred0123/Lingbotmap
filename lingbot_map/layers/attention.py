@@ -33,6 +33,46 @@ from typing_extensions import List
 from typing import Optional, Tuple
 
 
+
+def _pad_kv_to(parts_k, parts_v, target_kv: int, ref: Tensor) -> None:
+    """Append a zero K/V block so the concatenated KV matches the mask's width.
+
+    The mask's trailing columns are False, so these keys contribute exactly
+    nothing to the softmax.  They exist only to land the KV length on a
+    well-aligned value -- see gca_mask.build_gca_mask for the 5.4x measurement.
+    """
+    have = sum(p.shape[2] for p in parts_k)
+    pad = target_kv - have
+    if pad <= 0:
+        return
+    shape = (parts_k[-1].shape[0], parts_k[-1].shape[1], pad, parts_k[-1].shape[3])
+    parts_k.append(parts_k[-1].new_zeros(shape))
+    parts_v.append(parts_v[-1].new_zeros(shape))
+
+
+def attention_dtype(fallback: torch.dtype) -> torch.dtype:
+    """The dtype SDPA will actually RUN in -- not the dtype of its inputs.
+
+    Getting this wrong is expensive and invisible.  Under autocast the token
+    stream is fp32: every Block ends in ``fp32 + bf16``, which promotes, and
+    ``q_norm``/``k_norm`` are LayerNorms, which autocast keeps in fp32.  So
+    ``tokens.dtype`` and even ``q.dtype`` read fp32 while SDPA -- which is on the
+    autocast lower-precision list -- runs in bf16 and casts whatever it is given.
+
+    Sizing a float GCA mask off the token dtype therefore builds it at 4
+    bytes/element (10.0 GB at S=48 instead of 5.0) and then makes the kernel
+    allocate a bf16 copy of it on every one of the 24 blocks.  Testing a mask
+    against ``q.dtype`` has the mirror-image failure: it up-converts a correctly
+    sized bf16 mask back to fp32, once per block.
+
+    Outside autocast -- the camera head runs under ``autocast(enabled=False)`` --
+    the fallback is already right.
+    """
+    if torch.is_autocast_enabled("cuda"):
+        return torch.get_autocast_dtype("cuda")
+    return fallback
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -136,7 +176,7 @@ class CausalAttention(nn.Module):
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
 
-    def forward(self, x: Tensor, block_mask=None, pos=None, pos_kv=None, frame_seqlen=None, video_mask=None, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=1, num_frame_for_scale=-1, enable_3d_rope=False, sliding_window_size=-1, attend_to_scale_frames=False, num_random_frames=0, attend_to_special_tokens=False, num_register_tokens=4, is_scale_frames=False) -> Tensor:
+    def forward(self, x: Tensor, block_mask=None, pos=None, pos_kv=None, frame_seqlen=None, video_mask=None, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=1, num_frame_for_scale=-1, enable_3d_rope=False, sliding_window_size=-1, attend_to_scale_frames=False, num_random_frames=0, attend_to_special_tokens=False, num_register_tokens=4, is_scale_frames=False, attn_mask=None) -> Tensor:
         B, N, C = x.shape
 
         # Calculate special token indices
@@ -149,6 +189,19 @@ class CausalAttention(nn.Module):
 
         if self.gate_proj is not None:
             gate_score = self.gate_proj(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        # ========== Masked Parallel Mode (training) ==========
+        # Same role as SDPAAttention's masked branch, for the camera head's
+        # trunk: the whole window is one query block, the prefix cache is read
+        # only, and nothing is appended.  See gca_mask.plan_camera_window.
+        if attn_mask is not None:
+            x = self._forward_masked_parallel(
+                x, q, k, v, pos, enable_3d_rope, kv_cache, global_idx, attn_mask)
+            if self.gate_proj is not None:
+                x = x * torch.sigmoid(gate_score)
+            x = x.transpose(1, 2).reshape(B, -1, self.num_heads * self.head_dim)
+            return self.proj_drop(self.proj(x))
+
         if kv_cache is None:
             q, k = self.q_norm(q), self.k_norm(k)
             if self.rope is not None and not enable_3d_rope:
@@ -293,6 +346,57 @@ class CausalAttention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+    def _forward_masked_parallel(self, x, q, k, v, pos, enable_3d_rope,
+                                 kv_cache, global_idx, attn_mask) -> Tensor:
+        """Parallel attention over [prefix cache | window]; returns [B, H, N, D].
+
+        Key order is the streaming path's own order (attention.py:247-272) minus
+        the evicted-special block, which this stack never produces.  The caller
+        applies the output gate and projection so both branches share that tail.
+        """
+        q, k = self.q_norm(q), self.k_norm(k)
+        if self.rope is not None and not enable_3d_rope:
+            q = self.rope(q, pos)
+            k = self.rope(k, pos)
+        elif enable_3d_rope and pos is not None:
+            q = apply_rotary_emb(q, pos)
+            k = apply_rotary_emb(k, pos)
+
+        parts_k, parts_v = [], []
+        if isinstance(kv_cache, dict):
+            if torch.is_tensor(kv_cache.get(f"k_{global_idx}_special")):
+                raise NotImplementedError(
+                    "CausalAttention's masked path assumes no eviction, but block "
+                    f"{global_idx} has an evicted-special block. The eviction guard "
+                    "(attention.py:307) must have started firing -- tokens per frame "
+                    "is no longer 1. gca_mask.plan_camera_window is now wrong.")
+            pre_k = kv_cache.get(f"k_{global_idx}")
+            pre_v = kv_cache.get(f"v_{global_idx}")
+            if torch.is_tensor(pre_k):
+                a, b, c, d, e = pre_k.shape
+                parts_k.append(pre_k.reshape(a, b, c * d, e))
+                parts_v.append(pre_v.reshape(a, b, c * d, e))
+        parts_k.append(k)
+        parts_v.append(v)
+        _pad_kv_to(parts_k, parts_v, attn_mask.shape[-1], q)
+
+        k_full = torch.cat(parts_k, dim=2) if len(parts_k) > 1 else k
+        v_full = torch.cat(parts_v, dim=2) if len(parts_v) > 1 else v
+
+        if attn_mask.shape[-1] != k_full.shape[2] or attn_mask.shape[-2] != q.shape[2]:
+            raise RuntimeError(
+                f"camera GCA mask {tuple(attn_mask.shape)} does not match attention "
+                f"[Q={q.shape[2]}, KV={k_full.shape[2]}] at block {global_idx}.")
+        eff_dtype = attention_dtype(q.dtype)
+        if attn_mask.dtype not in (torch.bool, eff_dtype):
+            attn_mask = attn_mask.to(eff_dtype)
+
+        return F.scaled_dot_product_attention(
+            q, k_full, v_full,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            attn_mask=attn_mask,
+        )
 
     def _apply_kv_cache_eviction_causal(self, kv_cache, global_idx, camera_token_idx, scale_token_idx):
         """
@@ -595,12 +699,24 @@ class SDPAAttention(Attention):
     def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
                 kv_cache=None, global_idx=0, num_frame_per_block=1,
-                num_frame_for_scale=-1, num_register_tokens=4) -> Tensor:
+                num_frame_for_scale=-1, num_register_tokens=4,
+                attn_mask=None) -> Tensor:
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
+
+        # ========== Masked Parallel Mode (training) ==========
+        # The whole supervised window is one query block; the GCA read set is
+        # expressed as `attn_mask` instead of being materialized by mutating the
+        # cache frame by frame.  The prefix cache is READ ONLY here -- a training
+        # step must not advance the stream state, and leaving the cache untouched
+        # is also what makes gradient checkpointing safe on this path (a
+        # recomputed forward would otherwise append twice).
+        if attn_mask is not None:
+            return self._forward_masked_parallel(
+                x, q, k, v, pos, enable_3d_rope, kv_cache, global_idx, attn_mask)
 
         # ========== Batch Mode (no KV cache) ==========
         if kv_cache is None:
@@ -680,6 +796,77 @@ class SDPAAttention(Attention):
             )
             x = x.transpose(1, 2).reshape(B, q_seq_len, self.num_heads * self.head_dim)
 
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def _forward_masked_parallel(self, x, q, k, v, pos, enable_3d_rope,
+                                 kv_cache, global_idx, attn_mask) -> Tensor:
+        """Parallel S-frame attention over [prefix cache | window], gated by a mask.
+
+        Key order must match the layout ``gca_mask.build_gca_mask`` assumes, which
+        is also the order the streaming path concatenates in (attention.py:669):
+
+            [ evicted specials | cached frames | window ]
+
+        The prefix K already has RoPE baked in from when it was written, exactly
+        as in the cache path; only the window gets RoPE applied here.  Attention
+        is permutation invariant over keys, so the layout is a bookkeeping
+        convention, not a semantic one -- but it has to agree with the mask.
+        """
+        B, N, C = x.shape
+
+        if self.rope is not None and not enable_3d_rope:
+            q = self.rope(q, pos)
+            k = self.rope(k, pos)
+        elif self.rope is not None and enable_3d_rope:
+            q = apply_rotary_emb(q, pos)
+            k = apply_rotary_emb(k, pos)
+
+        parts_k, parts_v = [], []
+        if isinstance(kv_cache, dict):
+            spec_k = kv_cache.get(f"k_{global_idx}_special")
+            spec_v = kv_cache.get(f"v_{global_idx}_special")
+            if torch.is_tensor(spec_k):
+                sa, sb, sc, sd, se = spec_k.shape
+                parts_k.append(spec_k.reshape(sa, sb, sc * sd, se))
+                parts_v.append(spec_v.reshape(sa, sb, sc * sd, se))
+            pre_k = kv_cache.get(f"k_{global_idx}")
+            pre_v = kv_cache.get(f"v_{global_idx}")
+            if torch.is_tensor(pre_k):
+                a, b, c, d, e = pre_k.shape
+                parts_k.append(pre_k.reshape(a, b, c * d, e))
+                parts_v.append(pre_v.reshape(a, b, c * d, e))
+        parts_k.append(k)
+        parts_v.append(v)
+
+        # The mask carries the KV alignment padding (gca_mask.build_gca_mask); pad
+        # K/V to match it.  Folded into the same cat so it costs one small block,
+        # not a second full-size copy.
+        _pad_kv_to(parts_k, parts_v, attn_mask.shape[-1], q)
+        k_full = torch.cat(parts_k, dim=2) if len(parts_k) > 1 else k
+        v_full = torch.cat(parts_v, dim=2) if len(parts_v) > 1 else v
+
+        if attn_mask.shape[-1] != k_full.shape[2] or attn_mask.shape[-2] != q.shape[2]:
+            raise RuntimeError(
+                f"GCA mask {tuple(attn_mask.shape)} does not match attention "
+                f"[Q={q.shape[2]}, KV={k_full.shape[2]}] at block {global_idx}. "
+                f"The mask is built once per step from the cache layout; a mismatch "
+                f"means the cache moved under it.")
+        # Compare against the dtype SDPA will RUN in, not q.dtype: under autocast
+        # q is fp32 (q_norm is a LayerNorm) while the kernel is bf16, so testing
+        # against q.dtype would up-convert a correctly-sized bf16 mask to fp32 --
+        # once per block, 10 GB a time at S=48.
+        eff_dtype = attention_dtype(q.dtype)
+        if attn_mask.dtype not in (torch.bool, eff_dtype):
+            attn_mask = attn_mask.to(eff_dtype)
+
+        x = F.scaled_dot_product_attention(
+            q, k_full, v_full,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            attn_mask=attn_mask,
+        )
+        x = x.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x

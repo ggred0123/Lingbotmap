@@ -1,0 +1,20 @@
+# Arm B's trend, from the checkpoints that exist while it is still training.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_k1
+  - sd_s0ons50_k1
+  - sd_s0ons100_k1
+  - sd_s0ons200_k1
+  - sd_s0ons300_k1
+  - sd_s0ons400_k1
+  - sd_s0ons500_k1
+  - sd_s0ons600_k1
+  - sd_s0ons700_k1
+  - sd_s0ons800_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

@@ -4,7 +4,12 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
+import logging
 import math
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 
 import torch
@@ -16,8 +21,19 @@ from lingbot_map.layers.block import Block
 from lingbot_map.layers.block import CameraBlock
 from lingbot_map.heads.head_act import activate_pose
 from lingbot_map.layers.rope import WanRotaryPosEmbed
+from lingbot_map.aggregator import gca_mask
 from functools import partial
 from torch.utils.checkpoint import checkpoint
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CameraMaskedWindowSpec:
+    """Description of one supervised window for the camera head's trunk."""
+    window_start: int = 0
+    keyframe_interval: int = 1
+    mask_dtype: str = "bool"
 
 
 class CameraHead(nn.Module):
@@ -248,10 +264,80 @@ class CameraCausalHead(nn.Module):
         self.pos_cache = None
         self.frame_idx = 0
 
+        # Masked parallel training path (T2-e); inactive unless masked_window() is entered.
+        self._mask_window: Optional[CameraMaskedWindowSpec] = None
+        self.last_window_plan = None
+
     def clean_kv_cache(self):
         del self.kv_cache
         self.kv_cache = None
         self.frame_idx = 0
+
+    @contextlib.contextmanager
+    def masked_window(self, window_start: int = 0, keyframe_interval: int = 1,
+                      mask_dtype: str = "bool"):
+        """Run the trunk over the whole window in parallel, gated by a GCA mask.
+
+        The camera head is a second causal stack, independent of the aggregator:
+        4 refinement iterations, each with its own KV cache over 4 CameraBlocks,
+        one token per frame.  Its GCA rules are the aggregator's minus eviction
+        and minus special tokens -- see ``gca_mask.plan_camera_window`` for why.
+
+        Two things this fixes beyond the parallel speedup:
+
+        * ``trunk_fn`` keys its cache path off ``self.kv_cache is not None``, NOT
+          off ``causal_inference``.  So a parallel step taken after a rollout was
+          silently appending the whole window into the head's cache and advancing
+          ``frame_idx``.  Inside this context the cache is read only and
+          ``frame_idx`` does not move, so the stream state survives a training
+          step exactly as the aggregator's does.
+        * The 4x4 = 16 block calls share ONE mask instead of each rebuilding a
+          blockwise-causal mask (§2.3).
+        """
+        prev = self._mask_window
+        self._mask_window = CameraMaskedWindowSpec(
+            window_start=window_start, keyframe_interval=keyframe_interval,
+            mask_dtype=mask_dtype)
+        try:
+            yield self
+        finally:
+            self._mask_window = prev
+
+    def _prefix_frames(self):
+        """Frames held in the trunk's KV cache. All iterations/blocks agree."""
+        if self.kv_cache is None:
+            return 0
+        k0 = self.kv_cache[0].get("k_0")
+        if not torch.is_tensor(k0):
+            return 0
+        if k0.shape[3] != 1:
+            raise NotImplementedError(
+                f"camera trunk cache has {k0.shape[3]} tokens per frame, not 1. "
+                "The eviction guard (attention.py:307) would now fire and "
+                "gca_mask.plan_camera_window's no-eviction assumption breaks.")
+        return k0.shape[2]
+
+    def _build_masked_context(self, S, num_frame_for_scale, device, dtype):
+        """Plan + mask, built once and shared by all iterations and blocks."""
+        spec = self._mask_window
+        sf = num_frame_for_scale if num_frame_for_scale is not None and num_frame_for_scale > 0 else 0
+        plan = gca_mask.plan_camera_window(
+            S=S, window_start=spec.window_start, scale_frames=sf,
+            keyframe_interval=spec.keyframe_interval,
+            prefix_cached_frames=self._prefix_frames(),
+        )
+        vis = gca_mask.frame_visibility(plan)
+        if bool((vis == gca_mask.VIS_SPECIAL).any()):
+            raise AssertionError(
+                "camera window produced SPECIAL-only visibility, which this stack "
+                "cannot represent (it has no special-token memory)")
+        mask = gca_mask.build_gca_mask(
+            plan, tokens_per_frame=1, num_special=1, device=device,
+            mask_dtype=spec.mask_dtype, value_dtype=dtype,
+        )
+        logger.info("[camera mask path] %s", gca_mask.describe(plan))
+        self.last_window_plan = plan
+        return mask
 
     def forward(self, aggregated_tokens_list: list, mask=None, num_iterations: int = None, causal_inference=False, num_frame_per_block=1, num_frame_for_scale=-1, sliding_window_size=None, **kwargs) -> list:
         """
@@ -309,6 +395,18 @@ class CameraCausalHead(nn.Module):
         pred_pose_enc = None
         pred_pose_enc_list = []
 
+        # Masked parallel training path: one mask for all iterations x blocks.
+        attn_mask = None
+        if self._mask_window is not None:
+            if sliding_window_size is not None and sliding_window_size > 0:
+                raise NotImplementedError(
+                    f"camera trunk sliding_window_size={sliding_window_size}, but the "
+                    "masked path assumes the deployed setting (-1 / disabled). The "
+                    "streaming cache never evicts regardless, so a positive window "
+                    "here would make the two paths disagree by construction.")
+            attn_mask = self._build_masked_context(
+                S, num_frame_for_scale, pose_tokens.device, pose_tokens.dtype)
+
         # Check if this is the first call (processing scale frames)
         # Scale frames should use batch mode attention for numerical consistency
         is_scale_frames = (self.kv_cache is not None and self.frame_idx == 0)
@@ -355,7 +453,7 @@ class CameraCausalHead(nn.Module):
             pose_tokens_modulated = pose_tokens_modulated + pose_tokens
 
             for idx in range(self.trunk_depth):
-                pose_tokens_modulated = self.trunk[idx](pose_tokens_modulated, pos=pos3d, video_mask=mask, num_frames=S, frame_seqlen=1, kv_cache=self.kv_cache[i] if self.kv_cache is not None else None, global_idx=idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=sliding_window_size, enable_3d_rope=self.enable_3d_rope, is_scale_frames=is_scale_frames)
+                pose_tokens_modulated = self.trunk[idx](pose_tokens_modulated, pos=pos3d, video_mask=mask, num_frames=S, frame_seqlen=1, kv_cache=self.kv_cache[i] if self.kv_cache is not None else None, global_idx=idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=sliding_window_size, enable_3d_rope=self.enable_3d_rope, is_scale_frames=is_scale_frames, attn_mask=attn_mask)
             # Compute the delta update for the pose encoding.
             pred_pose_enc_delta = self.pose_branch(self.trunk_norm(pose_tokens_modulated))
 
@@ -370,8 +468,10 @@ class CameraCausalHead(nn.Module):
             )
             pred_pose_enc_list.append(activated_pose)
 
-        # Update frame_idx for streaming mode (KV cache)
-        if self.kv_cache is not None:
+        # Update frame_idx for streaming mode (KV cache).
+        # The masked path is a training step over a restored snapshot: it read the
+        # cache without appending, so the counter must not move either.
+        if self.kv_cache is not None and attn_mask is None:
             self.frame_idx += S
 
         return pred_pose_enc_list

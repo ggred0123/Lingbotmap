@@ -1,12 +1,13 @@
 # TUM RGB-D — lingbot_map trajectory evaluation.
 # Freiburg1 sequences; RGB frames associated with the nearest GT pose.
-workspace: /path/to/workspace/tum
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/tum
 
 datasets:
   - tum
 
 methods:
-  - lingbot_map
+  - base_h64
+  - sd_a1_h64
 
 evaluation:
   traj:

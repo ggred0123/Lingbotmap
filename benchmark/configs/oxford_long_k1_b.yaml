@@ -1,0 +1,14 @@
+# oxford_long K=1, half B -- the distilled k1 run, plus the single
+# sd_v6as600_auto scene (observatory-quarter-02) that the 15:29 interrupt left
+# unfinished.  The other 9 auto scenes carry .complete.json and are skipped.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+datasets:
+  - oxford_long
+methods:
+  - sd_v6as600_auto
+  - sd_v6as600_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

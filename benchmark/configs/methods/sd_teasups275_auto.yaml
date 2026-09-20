@@ -1,0 +1,20 @@
+# teasup step 275 -- teacher labels, MCD 10 scenes.  gtsup's control: identical
+# loss, policy (p_identity 0.35) and scenes; only the label bank differs, so the
+# MCD->target shift is common to both and cancels in the gtsup-teasup difference.
+model: lingbot_map
+_checkpoint: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/streaming3d-self-distill/bench_ckpt/sd_teasup_step275.pt
+_device: cuda
+_mode: streaming
+_use_amp: true
+_use_sdpa: true   # flashinfer not installed here
+_image_size: 518
+_patch_size: 14
+_enable_3d_rope: true
+_num_scale_frames: 8
+_max_frame_num: 1024
+_kv_cache_sliding_window: 64
+_kv_cache_scale_frames: 8
+_keyframe_interval: auto         # auto = 1 if frames<=threshold else ceil(N/threshold); or a fixed int
+_auto_keyframe_threshold: 320    # frame-count threshold driving the 'auto' keyframe_interval (streaming mode)
+_area_budget: 255000
+_align: 14

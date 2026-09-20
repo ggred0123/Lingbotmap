@@ -1,11 +1,22 @@
 # Oxford Spires — lingbot_map trajectory evaluation.
-workspace: /path/to/workspace/oxford
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
 
 datasets:
   - oxford
 
 methods:
-  - lingbot_map
+  - base_h16
+  - sd_a1_h16
+  - base_h32
+  - sd_a1_h32
+  - base_h64
+  - sd_a1_h64
+  - base_h128
+  - sd_a1_h128
+  - base_h256
+  - sd_a1_h256
+  - base_k28
+  - sd_a1_k28
 
 evaluation:
   traj:

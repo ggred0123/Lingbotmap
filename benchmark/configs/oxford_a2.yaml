@@ -1,0 +1,26 @@
+# Oxford Spires — A2 checkpoint evaluation (fresh h64/auto-K vs forced K=28).
+# Run with --debug to evaluate only the first scene (bodleian-library-02),
+# matching the existing base/sd_a1 partial results.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_a2s250_h64
+  - sd_a2s250_k28
+  - sd_a2s200_h64
+  - sd_a2s200_k28
+
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

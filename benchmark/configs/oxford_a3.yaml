@@ -1,0 +1,28 @@
+# Oxford Spires - A3 (fresh_mode=walk) vs A2 step300, K=1 (h64/auto) vs K=28.
+# --debug evaluates only bodleian-library-02, matching base/sd_a1/sd_a2s200/s250.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_a3s200_h64
+  - sd_a3s200_k28
+  - sd_a3s250_h64
+  - sd_a3s250_k28
+  - sd_a3s300_h64
+  - sd_a3s300_k28
+  - sd_a2s300_h64
+  - sd_a2s300_k28
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

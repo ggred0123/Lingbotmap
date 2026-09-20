@@ -1,0 +1,12 @@
+# gtlam step275 vs base on seven_scenes, same protocol gtsup and teasup were scored on.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/seven_scenes
+datasets:
+  - seven_scenes
+methods:
+  - base_auto
+  - sd_gtlams275_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

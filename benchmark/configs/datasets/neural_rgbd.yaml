@@ -1,5 +1,5 @@
 dataset: neural_rgbd
-raw_data_root: /path/to/neural_rgbd_data
+raw_data_root: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/data_bench/neural_rgbd_data
 sampling:
   strategy: sequence
   stride: 5

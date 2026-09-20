@@ -1,0 +1,3 @@
+# docs/coverage-corpus-plan.md 3-2: N=2 outdoor-walking scenes, teacher labels
+kth_day_10:data/mcd/kth_day_10/frames_10hz:labels/kth_day_10:mcd
+tuhh_day_03:data/mcd/tuhh_day_03/frames_10hz:labels/tuhh_day_03:mcd

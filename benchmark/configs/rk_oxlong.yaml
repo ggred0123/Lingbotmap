@@ -1,0 +1,13 @@
+# Re-anchor with the seam fitted on KEYFRAME centres (the first attempt fitted on
+# raw frames and lost 3.8x of ATE to non-keyframe noise -- see the report).
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+datasets:
+  - oxford_long
+methods:
+  - base_rk64_auto
+  - sd_v6is1200_rk64_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

@@ -1,0 +1,12 @@
+# teasup step275 against the same five benchmarks gtsup was scored on.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/vbr
+datasets:
+  - vbr
+methods:
+  - base_auto
+  - sd_teasups275_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

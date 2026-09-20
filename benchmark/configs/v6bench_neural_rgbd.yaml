@@ -1,0 +1,21 @@
+# Neural RGB-D (9 x 234, short indoor) -- released baseline vs the v6 eight-corpus mixture at steps 300 and 600.
+# Keyframe interval is 'auto' (the released deployment setting): 1 when a scene
+# is <= 320 frames, else ceil(N/320).  That ties K to sequence length, which is
+# the axis the MCD length ladder says decides whether distillation pays: it wins
+# past ~600 m and loses below it.  These five benchmarks span 38 to 12042 frames
+# per scene, so they test that prediction rather than just adding numbers.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/neural_rgbd
+datasets:
+  - neural_rgbd
+methods:
+  - sd_v6fs1200_auto
+  - sd_v6fs600_auto
+  - sd_v6fs150_auto
+  - base_auto
+  - sd_v6as300_auto
+  - sd_v6as600_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

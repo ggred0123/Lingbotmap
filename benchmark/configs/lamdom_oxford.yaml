@@ -1,0 +1,21 @@
+# gtlam step curve on Oxford -- the decisive comparison.  gtsup (A1PC weights,
+# GT labels) lost 45% of AUC_03 by step 275; if re-weighting to equal gradient
+# contribution is what that trade was made of, this curve does not.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_auto
+  - sd_gtlams25_auto
+  - sd_gtlams50_auto
+  - sd_gtlams75_auto
+  - sd_gtlams100_auto
+  - sd_gtlams150_auto
+  - sd_gtlams200_auto
+  - sd_gtlams250_auto
+  - sd_gtlams275_auto
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

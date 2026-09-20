@@ -1,0 +1,24 @@
+# Oxford Spires K=3, v5 cells vs base / a3 / a4 -- ALL 10 scenes (no --debug).
+# K=3 x 1.711 m/frame = 5.13 m keyframe gap, the Oxford analogue of MCD K=28.
+# Split across two GPUs by method; both halves share the workspace (per-method dirs).
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_v5bs300_k3
+  - base_k3
+  - sd_a4s300_k3
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

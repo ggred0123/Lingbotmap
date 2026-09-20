@@ -1,0 +1,23 @@
+# Oxford Spires K=28 -- v5 cells vs base / a3 / a4, all 10 scenes.
+# Keyframe baseline at this K (experiments/kf_baseline.py, loader stride 12): 44.17 m / 54.1 deg -- far outside the training regime; reported for completeness, never a gate (docs/self-distill-ver5.md)
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - sd_v5bs300_k28
+  - base_k28
+  - sd_a4s300_k28
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

@@ -333,7 +333,7 @@ class WanRotaryPosEmbed(nn.Module):
         # 将三个维度的频率在最后一维拼接: [max_seq_len, (t_dim + h_dim + w_dim)//2]
         self.freqs = torch.cat(freqs, dim=1)
 
-    def forward(self, ppf, pph, ppw, patch_start_idx, device: torch.device, f_start: int = 0, f_end: Optional[int] = None) -> torch.Tensor:
+    def forward(self, ppf, pph, ppw, patch_start_idx, device: torch.device, f_start: int = 0, f_end: Optional[int] = None, f_indices: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         前向传播：为3D输入（视频帧+patch）生成旋转位置编码
         
@@ -382,13 +382,23 @@ class WanRotaryPosEmbed(nn.Module):
         )
         
         # 处理causal模式：如果指定了f_end，重新计算ppf和帧范围
-        if f_end is not None:
+        #
+        # f_indices: explicit per-frame temporal index, for the masked parallel
+        # training path.  A streaming rollout advances its frame counter only on
+        # frames that persist (anchor + keyframes), so a window containing
+        # non-keyframes has REPEATED temporal indices and cannot be described by
+        # a contiguous [f_start, f_end) slice.  See gca_mask.plan_window.
+        if f_indices is not None:
+            f_indices = f_indices.to(device=self.freqs.device, dtype=torch.long)
+            ppf = int(f_indices.shape[0])
+            freqs_time = freqs[0].index_select(0, f_indices)
+        elif f_end is not None:
             ppf = f_end - f_start
-            frame_slice = slice(f_start, f_end)
+            freqs_time = freqs[0][f_start:f_end]
         else:
             # 非causal模式：使用从0开始的ppf个帧
-            frame_slice = slice(0, ppf)
-        
+            freqs_time = freqs[0][0:ppf]
+
         # 步骤2：处理特殊token（如果存在）
         ## For other tokens
         if patch_start_idx > 0:
@@ -396,7 +406,7 @@ class WanRotaryPosEmbed(nn.Module):
             # 特殊token位于对角线位置 (f, i, i)，每个特殊token有唯一位置
             # camera: (f, 0, 0), register_0: (f, 1, 1), ..., scale: (f, 5, 5)
             # Shape: (ppf, patch_start_idx, dim)
-            freqs_special_f = freqs[0][frame_slice].reshape(ppf, 1, -1).expand(ppf, patch_start_idx, -1)  # (ppf, patch_start_idx, dim_f) 帧维度变化
+            freqs_special_f = freqs_time.reshape(ppf, 1, -1).expand(ppf, patch_start_idx, -1)  # (ppf, patch_start_idx, dim_f) 帧维度变化
             freqs_special_h = freqs[1][:patch_start_idx].reshape(1, patch_start_idx, -1).expand(ppf, patch_start_idx, -1)  # (ppf, patch_start_idx, dim_h) 高度=0,1,2,...
             freqs_special_w = freqs[2][:patch_start_idx].reshape(1, patch_start_idx, -1).expand(ppf, patch_start_idx, -1)  # (ppf, patch_start_idx, dim_w) 宽度=0,1,2,...
             freqs_special = torch.cat([freqs_special_f, freqs_special_h, freqs_special_w], dim=-1)  # (ppf, patch_start_idx, dim) 拼接三维
@@ -406,7 +416,7 @@ class WanRotaryPosEmbed(nn.Module):
             # Patch位于 (f, patch_start_idx+h, patch_start_idx+w)，h,w 整体偏移 patch_start_idx
             # 这样 patches 与 special tokens 位置不冲突，且 h,w 对称处理
             # Shape: (ppf, pph, ppw, dim)
-            freqs_f = freqs[0][frame_slice].reshape(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_f) 帧维度
+            freqs_f = freqs_time.reshape(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_f) 帧维度
             freqs_h = freqs[1][patch_start_idx : patch_start_idx + pph].reshape(1, pph, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_h) 高度从patch_start_idx开始
             freqs_w = freqs[2][patch_start_idx : patch_start_idx + ppw].reshape(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_w) 宽度从patch_start_idx开始
             freqs_patches = torch.cat([freqs_f, freqs_h, freqs_w], dim=-1)  # (ppf, pph, ppw, dim) 拼接三维
@@ -426,7 +436,7 @@ class WanRotaryPosEmbed(nn.Module):
         
         # 如果没有特殊token（patch_start_idx == 0），只处理图像patches
         # 所有patches位于 (f, 0:pph, 0:ppw)
-        freqs_f = freqs[0][frame_slice].reshape(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_f) 帧维度
+        freqs_f = freqs_time.reshape(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_f) 帧维度
         freqs_h = freqs[1][:pph].reshape(1, pph, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_h) 高度从0开始
         freqs_w = freqs[2][:ppw].reshape(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_w) 宽度从0开始
         freqs = torch.cat([freqs_f, freqs_h, freqs_w], dim=-1).reshape(1, 1, ppf * pph * ppw, -1)  # (1, 1, ppf * pph * ppw, dim)

@@ -1,0 +1,33 @@
+# Oxford Spires at stride 1 -- the control the short-vs-long argument was missing.
+#
+# configs/oxford.yaml reads the same scenes at stride 12: 320 frames, 540 m,
+# 1.71 m/frame.  At stride 1 it is 3840 frames over the SAME 540 m, i.e. 0.14
+# m/frame -- which is MCD's 0.16.  So this pair differs from MCD L=3840 (3840
+# frames, 0.15 m/frame, 592 m) in DOMAIN ONLY, with frame count, per-frame
+# motion and path length all matched for the first time.
+#
+#   base loses here  -> Oxford's problem was frame density, not path length
+#   base still wins  -> 540 m is simply too short and density is a red herring
+#
+# 'auto' resolves to K = ceil(3840/320) = 12 for every scene, which is also the
+# MCD grid point where v6a beats base hardest (30.6 vs 54.1).  The _k1 pair adds
+# the matched low-K point (0.14 vs MCD's 0.16 m per keyframe).
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford_long
+
+datasets:
+  - oxford_long
+
+methods:
+  - sd_v6fs1200_auto
+  - sd_v6fs600_auto
+  - sd_v6fs150_auto
+  - base_auto
+  - sd_v6as600_auto
+  - base_k1
+  - sd_v6as600_k1
+
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

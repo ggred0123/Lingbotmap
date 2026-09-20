@@ -6,6 +6,7 @@ imported as the ``lingbot_map`` Python module) for benchmark evaluation.
 Both streaming and windowed inference modes are supported via ``GCTStream``.
 """
 
+import os
 import logging
 import torch
 import numpy as np
@@ -63,6 +64,8 @@ class LingbotMapMethod(BaseMethod):
         overlap_size: Optional[int] = None,
         keyframe_interval: Any = "auto",
         auto_keyframe_threshold: int = _DEFAULT_AUTO_KEYFRAME_THRESHOLD,
+        reanchor_keyframes: int = 0,
+        reanchor_overlap: int = 32,
         flow_threshold: float = 0.0,
         max_non_keyframe_gap: int = 30,
         align: int = 14,
@@ -92,6 +95,8 @@ class LingbotMapMethod(BaseMethod):
         self.overlap_size = overlap_size
         self.keyframe_interval = keyframe_interval
         self.auto_keyframe_threshold = int(auto_keyframe_threshold)
+        self.reanchor_keyframes = int(reanchor_keyframes)
+        self.reanchor_overlap = int(reanchor_overlap)
         self.flow_threshold = flow_threshold
         self.max_non_keyframe_gap = max_non_keyframe_gap
 
@@ -107,6 +112,22 @@ class LingbotMapMethod(BaseMethod):
 
     def _load_model(self):
         """Load LingbotMap (GCTStream) model from checkpoint."""
+        # ★ A CAP SO A BENCH CANNOT STARVE A TRAINER SHARING THE CARD.
+        # The caching allocator never gives memory back, so a long bench keeps
+        # growing: measured 7.9 GB at start and 140 GB six minutes later on a
+        # 319-frame grid.  A trainer that was still filling its stream pool at
+        # that moment died of OOM and lost the run.  BENCH_GPU_MEM_FRACTION
+        # bounds this process instead, so the worst case is a slower bench
+        # rather than a dead 12-hour training run.
+        frac = os.environ.get("BENCH_GPU_MEM_FRACTION")
+        if frac and torch.cuda.is_available():
+            try:
+                torch.cuda.set_per_process_memory_fraction(float(frac))
+                total = torch.cuda.get_device_properties(0).total_memory / 2**30
+                print(f"  → GPU memory capped at {float(frac):.0%} "
+                      f"({float(frac) * total:.0f} GiB of {total:.0f})")
+            except Exception as exc:                              # noqa: BLE001
+                print(f"  → could not cap GPU memory: {exc}")
         if self.mode == 'windowed':
             from lingbot_map.models.gct_stream_window import GCTStream
         else:
@@ -167,12 +188,16 @@ class LingbotMapMethod(BaseMethod):
                         f"(num_frames={num_frames}, raw={self.keyframe_interval!r}, "
                         f"threshold={self.auto_keyframe_threshold})"
                     )
-                predictions = self.model.inference_streaming(
-                    images,
-                    num_scale_frames=self.num_scale_frames,
-                    keyframe_interval=keyframe_interval,
-                    output_device=torch.device("cpu"),
-                )
+                if self.reanchor_keyframes > 0:
+                    predictions = self._run_streaming_reanchored(
+                        images, keyframe_interval)
+                else:
+                    predictions = self.model.inference_streaming(
+                        images,
+                        num_scale_frames=self.num_scale_frames,
+                        keyframe_interval=keyframe_interval,
+                        output_device=torch.device("cpu"),
+                    )
             else:
                 predictions = self.model.inference_windowed(
                     images,
@@ -186,6 +211,150 @@ class LingbotMapMethod(BaseMethod):
                 )
 
         return predictions
+
+    def _run_streaming_reanchored(self, images, keyframe_interval):
+        """Streaming inference that re-anchors every M keyframes and stitches.
+
+        docs/eval-metric-audit.html section 10 candidate 4, the one the document
+        marks as "a diagnostic first": the stitched teacher bank re-anchors every
+        48 frames OFFLINE, and this does the same thing ONLINE.  Drift is then
+        bounded by one re-anchor period, so the M at which ATE comes back to the
+        base level is a direct read of how deep the model holds its scale.
+
+        Mechanics.  The sequence is cut into segments of ``M * keyframe_interval``
+        raw frames.  Each segment is an independent ``inference_streaming`` call,
+        so it clears the KV cache and re-runs its own scale-frame phase -- a fresh
+        gauge every time.  Consecutive segments share ``reanchor_overlap`` frames,
+        and a robust Sim(3) fitted on those shared camera centres carries the new
+        segment into the running gauge.  This is experiments/stitch_bank.py's seam,
+        with the same trimmed fit and the same pose convention.
+
+        ★ THE POSE CONVENTION IS THE PART THAT FAILS SILENTLY.  pose_enc[:3] is the
+        camera CENTRE in world coordinates and pose_enc[3:7] the cam->world
+        quaternion in XYZW; the seam has to transport BOTH (C -> sRC+t and
+        R -> R_seam R).  Mapping the centres alone leaves every rotation in the old
+        gauge and the trajectory silently bends at each seam.
+
+        Costs one extra scale phase plus ``reanchor_overlap`` re-run frames per
+        segment -- about 4% at M=64, K=12 -- and no retraining.
+        """
+        import numpy as np
+        import sys as _sys
+        from pathlib import Path as _Path
+        _exp = str(_Path(__file__).resolve().parents[2] / "experiments")
+        if _exp not in _sys.path:
+            _sys.path.insert(0, _exp)
+        from stitch_bank import apply_sim3, fit_seam           # noqa: E402
+
+        M = int(self.reanchor_keyframes)
+        K = max(1, int(keyframe_interval))
+        sf = int(self.num_scale_frames)
+        S = int(images.shape[0])
+        period = M * K
+
+        # ★ THE SEAM IS FITTED ON KEYFRAMES, AND THE OVERLAP IS COUNTED IN THEM.
+        # Measured the other way first -- 32 RAW frames of overlap -- and ATE on
+        # oxford_long (K=12) went 2.6 -> 12.1 m while the keyframe-level rpe
+        # improved.  eval-metric-audit.html section 01(c) says why: at K>1 the
+        # frames between keyframes leave no KV behind, so consecutive raw poses
+        # are independent one-shot estimates whose step directions are close to
+        # random.  A Sim(3) fitted on 32 of those is fitted on noise, over a
+        # baseline of only 32/12 keyframes of real motion.  Keyframe centres are
+        # the cached, mutually consistent ones, so the seam uses those alone.
+        # At K=1 the two readings coincide, so K=1 results are unaffected.
+        ov_kf = max(8, int(self.reanchor_overlap))
+        ov = ov_kf * K
+        if period < ov + sf:
+            raise ValueError(
+                f"re-anchor period {period} (M={M} x K={K}) must exceed the "
+                f"{ov}-frame overlap plus {sf} scale frames; raise "
+                "_reanchor_keyframes or lower _reanchor_overlap")
+
+        # ★ EVERY SEGMENT STARTS ON A MULTIPLE OF K so that all segments share
+        # one keyframe phase (global keyframes land at f = sf mod K).  Without
+        # that the grids are offset by up to K/2 and there are no shared
+        # keyframes to fit the seam on at all.
+        segs, s = [], 0
+        while True:
+            e = min(S, s + (sf if s == 0 else ov) + period)
+            if S - e < max(2 * sf, K):         # never leave an unstitchable tail
+                e = S
+            segs.append((s, e))
+            if e >= S:
+                break
+            s = max(s + K, ((e - ov) // K) * K)
+        print(f"  → re-anchor every {M} keyframes ({period} raw frames): "
+              f"{len(segs)} segments, overlap {ov_kf} kf ({ov} frames)")
+
+        glob_pose = np.zeros((S, 9), dtype=np.float64)   # stitched, in seg 0's gauge
+        owned = {}                                        # frame -> (seg, local idx, scale)
+        seams = []
+        prev_end = 0
+        for j, (a, b) in enumerate(segs):
+            pred = self.model.inference_streaming(
+                images[a:b],
+                num_scale_frames=self.num_scale_frames,
+                keyframe_interval=K,
+                output_device=torch.device("cpu"),
+            )
+            pose = pred["pose_enc"][0].float().numpy().astype(np.float64)
+            if j == 0:
+                glob_pose[a:b] = pose
+                scale = 1.0
+            else:
+                n = prev_end - a                          # shared frames
+                # keyframe offsets inside the shared span: global f = sf mod K
+                kf = np.array([i for i in range(n)
+                               if (a + i - sf) % K == 0 and a + i >= sf], dtype=int)
+                if len(kf) < 8:
+                    raise RuntimeError(
+                        f"re-anchor seam {j} shares only {len(kf)} keyframes "
+                        f"({n} frames); raise _reanchor_overlap")
+                seam = fit_seam(pose[kf, :3], glob_pose[a + kf, :3])
+                seams.append(seam)
+                scale = seam["s"]
+                pose = apply_sim3(pose, seam["s"], np.asarray(seam["R"]),
+                                  np.asarray(seam["t"]))
+                glob_pose[prev_end:b] = pose[n:]
+            for f in range(prev_end if j else a, b):
+                owned[f] = (j, f - a, scale)
+            prev_end = b
+            self._seg_cache = getattr(self, "_seg_cache", {})
+            self._seg_cache[j] = pred
+
+        if seams:
+            r = [s["resid_median"] for s in seams]
+            sc = np.array([s["s"] for s in seams])
+            cond = np.array([s["cond"] for s in seams])
+            # |log s| > 0.2 is a seam that rescales the world by more than 20%;
+            # a large `cond` means the overlap was nearly a straight line, where
+            # the Sim(3) scale is barely determined at all.
+            bad = int((np.abs(np.log(np.maximum(sc, 1e-9))) > 0.2).sum())
+            print(f"  → {len(seams)} seams, median residual "
+                  f"{np.median(r):.4f} (max {max(r):.4f}), scale spread "
+                  f"{sc.min():.3f}-{sc.max():.3f}, median scale {np.median(sc):.3f}, "
+                  f"|log s|>0.2 on {bad}/{len(seams)}, max cond {cond.max():.0f}")
+
+        # ── reassemble, taking each frame from the segment that owns it ──────
+        keys = [k for k in self._seg_cache[0] if k != "pose_enc"]
+        out = {"pose_enc": torch.from_numpy(glob_pose).float().unsqueeze(0)}
+        for k in keys:
+            v0 = self._seg_cache[0][k]
+            if not torch.is_tensor(v0) or v0.dim() < 2 or v0.shape[1] != (segs[0][1] - segs[0][0]):
+                out[k] = v0                                # not a per-frame tensor
+                continue
+            rows = []
+            for f in range(S):
+                j, li, sc = owned[f]
+                t = self._seg_cache[j][k][:, li:li + 1]
+                # depth and world points live in the segment's gauge: the seam's
+                # scale applies to them exactly as it applies to the centres.
+                if k in ("depth", "world_points") and sc != 1.0:
+                    t = t * float(sc)
+                rows.append(t)
+            out[k] = torch.cat(rows, dim=1)
+        self._seg_cache = {}
+        return out
 
     def _process_outputs(self, predictions, image_shape):
         """Convert model predictions to benchmark output format.

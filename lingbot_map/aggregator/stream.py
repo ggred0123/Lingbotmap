@@ -8,7 +8,9 @@ Provides:
 - Streaming inference with FlashInfer paged KV cache
 """
 
+import contextlib
 import logging
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple, List
@@ -16,8 +18,25 @@ from typing import Optional, Tuple, List
 from lingbot_map.layers.block import Block, FlashInferBlock, SDPABlock
 from lingbot_map.layers.rope import WanRotaryPosEmbed
 from lingbot_map.aggregator.base import AggregatorBase, slice_expand_and_flatten
+from lingbot_map.aggregator import gca_mask
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MaskedWindowSpec:
+    """Caller-supplied description of one supervised window.
+
+    Only ``window_start`` cannot be recovered from the model state: the KV cache
+    knows how many keyframes it holds but not which absolute frame indices they
+    came from, and the frame roles (anchor / keyframe / non-keyframe) are defined
+    on the absolute index.  Everything else is read back off the live cache so a
+    plan can never silently disagree with the state it describes.
+    """
+    window_start: int = 0            # absolute frame index of window[0]
+    keyframe_interval: int = 1       # K, the student's deployed keyframe interval
+    mask_dtype: str = "bool"         # "bool" or "float" -- see §6-Q2
+    check_prefix: object = True      # True=raise, "warn"=log, False=skip
 
 
 class AggregatorStream(AggregatorBase):
@@ -182,6 +201,10 @@ class AggregatorStream(AggregatorBase):
         self.kv_cache = {}  # Dict-based cache for SDPA
         self.total_frames_processed = 0
         self._cached_pos3d = None
+        # Masked parallel training path (T1); inactive unless masked_window() is entered.
+        self._mask_window: Optional[MaskedWindowSpec] = None
+        self._masked_ctx = None
+        self.last_window_plan = None
 
         if self.use_sdpa:
             # Dict-based KV cache for SDPA
@@ -245,6 +268,7 @@ class AggregatorStream(AggregatorBase):
                     self.kv_cache[key] = None
         self.total_frames_processed = 0
         self._cached_pos3d = None
+        self._masked_ctx = None
         logger.info("KV cache cleaned")
 
     def _init_3d_rope(self):
@@ -406,11 +430,256 @@ class AggregatorStream(AggregatorBase):
         image_height = kwargs.get('image_height', self.img_size)
         image_width = kwargs.get('image_width', self.img_size)
 
+        if self._mask_window is not None:
+            return self._process_masked_parallel(
+                tokens, B, S_local, S_global, P, C, global_idx, pos,
+                num_frame_for_scale=num_frame_for_scale,
+                image_height=image_height, image_width=image_width,
+            )
+
         return self._process_causal_stream(
             tokens, B, S_local, S_global, P, C, global_idx, pos,
             num_frame_per_block, sliding_window_size, num_frame_for_scale,
             image_height=image_height, image_width=image_width
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Masked parallel global attention -- the training path (docs/phase1-plan.md §3-T1)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def masked_window(self, window_start: int = 0, keyframe_interval: int = 1,
+                      mask_dtype: str = "bool", check_prefix=True):
+        """Run global attention over the whole window in parallel, gated by a GCA mask.
+
+        Inside this context ``forward`` pushes all S frames through the 24 global
+        blocks at once and reproduces the streaming read set with a mask instead
+        of a mutating cache.  The prefix cache is read, never written, and
+        ``total_frames_processed`` does not advance: the stream state is exactly
+        where it was when the context was entered, so a trainer can take many
+        steps from one restored snapshot.
+
+        Args:
+            window_start: absolute frame index of the window's first frame.  This
+                is the one thing the model state cannot tell us and it decides
+                every frame's role, so it is not optional in practice.
+            keyframe_interval: K, matching the deployed rollout.
+            mask_dtype: "bool" (1 B/elem) or "float" (additive bias, 2 B/elem).
+            check_prefix: cross-check the cache occupancy against what
+                (window_start, K, sf) predicts.  True (default) raises on
+                disagreement, "warn" only logs, False skips.  This is the one
+                remaining way to be silently wrong -- see
+                ``_check_prefix_consistency``.
+
+        The cache path is untouched -- leaving this context restores inference
+        behaviour exactly.
+        """
+        if not self.use_sdpa:
+            raise NotImplementedError(
+                "The masked parallel path is SDPA only. FlashInfer's paged cache is "
+                "neither differentiable nor readable as a dense tensor; build the "
+                "model with use_sdpa=True for training.")
+        if not (self.kv_cache_include_scale_frames and self.kv_cache_cross_frame_special
+                and not self.kv_cache_camera_only):
+            raise NotImplementedError(
+                "The GCA predicate assumes the deployed eviction policy "
+                "(include_scale_frames=True, cross_frame_special=True, camera_only=False); "
+                f"got {self.kv_cache_include_scale_frames}/"
+                f"{self.kv_cache_cross_frame_special}/{self.kv_cache_camera_only}.")
+        prev = self._mask_window
+        self._mask_window = MaskedWindowSpec(
+            window_start=window_start, keyframe_interval=keyframe_interval,
+            mask_dtype=mask_dtype, check_prefix=check_prefix)
+        try:
+            yield self
+        finally:
+            self._mask_window = prev
+            self._masked_ctx = None
+
+    def _prefix_layout(self):
+        """(cached frames, evicted frames, special tokens per evicted frame).
+
+        Read off block 0's tensors; all 24 blocks share the same frame layout
+        because they are appended and evicted in lockstep.
+        """
+        if not isinstance(self.kv_cache, dict):
+            return 0, 0, self.num_special_tokens
+        k0 = self.kv_cache.get("k_0")
+        ks0 = self.kv_cache.get("k_0_special")
+        cached = k0.shape[2] if torch.is_tensor(k0) else 0
+        evicted = ks0.shape[2] if torch.is_tensor(ks0) else 0
+        n_spec = ks0.shape[3] if torch.is_tensor(ks0) else self.num_special_tokens
+        return cached, evicted, n_spec
+
+    def _build_masked_context(self, B, S_global, P, device, dtype,
+                              image_height, image_width, num_frame_for_scale):
+        """Plan the window, build the mask and the RoPE positions -- ONCE per step.
+
+        §2.3: the released ``CameraBlock`` rebuilds its mask inside every block's
+        forward, 24 times per step.  Doing that here costs 16.3 -> 44.6 GB at
+        S=64.  The context is built on the first global block group and reused by
+        the remaining 23.
+        """
+        spec = self._mask_window
+        sf = num_frame_for_scale if num_frame_for_scale is not None else self.num_frame_for_scale
+        cached, evicted, n_spec_ev = self._prefix_layout()
+
+        plan = gca_mask.plan_window(
+            S=S_global,
+            window_start=spec.window_start,
+            scale_frames=sf,
+            keyframe_interval=spec.keyframe_interval,
+            sliding_window=self.kv_cache_sliding_window,
+            total_frames_processed=self.total_frames_processed,
+            prefix_cached_frames=cached,
+            prefix_evicted_frames=evicted,
+        )
+
+        if spec.check_prefix is not False:
+            self._check_prefix_consistency(plan, sf, spec)
+
+        mask = gca_mask.build_gca_mask(
+            plan, tokens_per_frame=P, num_special=self.num_special_tokens,
+            device=device, mask_dtype=spec.mask_dtype, value_dtype=dtype,
+            special_tokens_per_evicted=n_spec_ev,
+        )
+
+        pos3d = None
+        if self.enable_3d_rope and self.rope3d is not None:
+            H = image_height if image_height is not None else self.img_size
+            W = image_width if image_width is not None else self.img_size
+            pos3d = self.rope3d(
+                ppf=S_global,
+                pph=H // self.patch_size,
+                ppw=W // self.patch_size,
+                patch_start_idx=self.num_special_tokens,
+                device=device,
+                f_indices=plan.rope_frame_idx,
+            )
+
+        logger.info("[mask path] %s", gca_mask.describe(plan))
+        # Published for the equivalence harness (T2) and for the camera head,
+        # which still needs the deployed temporal indices -- see T2-e.
+        self.last_window_plan = plan
+        return {"plan": plan, "mask": mask, "pos3d": pos3d}
+
+    def _check_prefix_consistency(self, plan, sf, spec):
+        """Does the live cache agree with (window_start, K, sf)?
+
+        This is the ONLY way left to be silently wrong.  Every other failure mode
+        shows up as a shape mismatch and raises; a ``window_start`` that does not
+        match the rollout that produced the cache does not -- the shapes still
+        line up and only the read set is off, so the step trains happily on the
+        wrong context.  Predict the keyframe count independently and compare.
+
+        Raises by default.  ``check_prefix="warn"`` downgrades it for the case
+        where the caller knows the rollout schedule was not uniform-K from frame
+        0 and has verified the layout another way; ``False`` skips it.
+        """
+        t0, K = spec.window_start, max(int(spec.keyframe_interval), 1)
+        predicted = 0 if t0 <= sf else (t0 - sf + K - 1) // K
+        problems = []
+        if predicted != plan.n_kf_before:
+            problems.append(
+                f"cache holds {plan.n_kf_before} keyframes "
+                f"({plan.prefix_full_keyframes} full + {plan.prefix_evicted} evicted) "
+                f"but window_start={t0} with K={K}, sf={sf} implies {predicted}; "
+                f"window_start is probably wrong")
+        if plan.prefix_full_keyframes and t0 <= sf:
+            problems.append(
+                f"window_start={t0} sits inside the anchor but the cache is already "
+                f"populated; did you forget clean_kv_cache()?")
+        if not problems:
+            return
+        msg = ("[mask path] the prefix cache disagrees with the declared window. "
+               "The mask would be built for a rollout that did not happen, and "
+               "nothing downstream would notice (shapes still match). "
+               + "; ".join(problems)
+               + ". Pass check_prefix='warn' to proceed anyway.")
+        if spec.check_prefix == "warn":
+            logger.warning("%s", msg)
+        else:
+            raise ValueError(msg)
+
+    def _process_masked_parallel(
+        self,
+        tokens: torch.Tensor,
+        B: int,
+        S_local: int,
+        S_global: int,
+        P: int,
+        C: int,
+        global_idx: int,
+        pos: Optional[torch.Tensor] = None,
+        num_frame_for_scale: Optional[int] = None,
+        image_height: Optional[int] = None,
+        image_width: Optional[int] = None,
+    ):
+        """Global attention over all S frames at once, with the GCA mask.
+
+        Same blocks, same weights, same token layout as the streaming path; the
+        only difference is that the read set comes from a mask instead of from
+        the current contents of the cache.  Gradient checkpointing is applied
+        here (and only here): the streaming path mutates the cache in place, so
+        recomputing a block would append its K/V a second time.
+        """
+        if tokens.shape != (B, S_local * P, C):
+            tokens = tokens.view(B, S_local, P, C).view(B, S_local * P, C)
+
+        if global_idx < self.aa_block_size:
+            self._masked_ctx = self._build_masked_context(
+                B, S_global, P, tokens.device, tokens.dtype,
+                image_height, image_width, num_frame_for_scale)
+        ctx = self._masked_ctx
+        if ctx is None:
+            raise RuntimeError("masked context missing; global blocks ran out of order")
+
+        if self.enable_3d_rope:
+            pos_use = ctx["pos3d"]
+        else:
+            pos_use = pos
+            if pos_use is not None and pos_use.shape != (B, S_global * P, 2):
+                pos_use = pos_use.view(B, S_global, P, 2).view(B, S_global * P, 2)
+
+        num_patches = P - self.num_special_tokens
+        intermediates = []
+
+        for _ in range(self.aa_block_size):
+            block = self.global_blocks[global_idx]
+
+            def run(x, block=block, idx=global_idx):
+                return block(
+                    x,
+                    pos=pos_use,
+                    num_patches=num_patches,
+                    num_special=self.num_special_tokens,
+                    num_frames=S_global,
+                    enable_3d_rope=self.enable_3d_rope,
+                    kv_cache=self.kv_cache,       # read only in this path
+                    global_idx=idx,
+                    num_frame_per_block=S_global,
+                    num_frame_for_scale=(num_frame_for_scale if num_frame_for_scale is not None
+                                         else self.num_frame_for_scale),
+                    num_register_tokens=self.num_register_tokens,
+                    attn_mask=ctx["mask"],
+                )
+
+            if self.training and self.use_gradient_checkpoint:
+                from torch.utils.checkpoint import checkpoint
+                tokens = checkpoint(run, tokens, use_reentrant=self.use_reentrant)
+            else:
+                tokens = run(tokens)
+
+            global_idx += 1
+            intermediates.append(tokens.view(B, S_local, P, C))
+
+        # The window is a training step over a restored snapshot: the stream
+        # state must come out exactly as it went in, so neither the cache nor
+        # total_frames_processed is advanced here.
+        if global_idx >= self.depth:
+            self._masked_ctx = None
+
+        return tokens, global_idx, intermediates
 
     def _process_causal_stream(
         self,

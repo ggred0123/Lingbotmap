@@ -1,0 +1,14 @@
+# v6h step 600 at Oxford K=1.  v6f and v6g are already scored at the same step
+# with the same banks (all-L48) and the same horizon policy, so this isolates the
+# corpus weights: mcd 30->10, paralleldomain4d 15->30, unrealstereo4k 10->15.
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - base_k1
+  - sd_v6hs600_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

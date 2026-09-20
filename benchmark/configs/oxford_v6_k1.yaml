@@ -1,0 +1,12 @@
+# Oxford Spires K=1 for the v6 eight-corpus mixture (step 300 and 600).
+workspace: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/bench_ws/oxford
+datasets:
+  - oxford
+methods:
+  - sd_v6as300_k1
+  - sd_v6as600_k1
+evaluation:
+  traj: {enable: true, vis: false}
+  auc: {enable: true, vis: false, aggregation: both}
+  depth: {enable: false}
+  points: {enable: false}

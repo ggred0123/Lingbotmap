@@ -1,5 +1,5 @@
 dataset: eth3d
-raw_data_root: /path/to/eth3d
+raw_data_root: /NHNHOME/WORKSPACE/26msit001_A/bispl_lab/youngmin/data_bench/eth3d
 _load_img_size: 518
 evaluation:
   depth:
